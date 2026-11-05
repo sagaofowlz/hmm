@@ -131,6 +131,18 @@ jobs:
           test -s "dist/runtime/starfait/$ENTRY_FILE"
           find dist/runtime/starfait -maxdepth 2 -type f -printf '%P (%k KB)\n' | sort
 
+      - name: Vendor Kotlin/Wasm npm dependency
+        run: |
+          set -euo pipefail
+          npm install --prefix .web-deps --no-save --no-package-lock --ignore-scripts --no-audit --no-fund @js-joda/core@6.1.0
+          JODA_DIR=".web-deps/node_modules/@js-joda/core"
+          test -s "$JODA_DIR/dist/js-joda.esm.js"
+          test -s "$JODA_DIR/LICENSE"
+          mkdir -p dist/runtime/starfait/vendor
+          cp "$JODA_DIR/dist/js-joda.esm.js" dist/runtime/starfait/vendor/js-joda.esm.js
+          cp "$JODA_DIR/LICENSE" dist/third-party/JS-JODA-LICENSE.txt
+          echo "Vendored @js-joda/core 6.1.0 for the browser import map."
+
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
 
