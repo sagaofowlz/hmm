@@ -1,25 +1,27 @@
-# Browser runner adapter (not implemented yet)
+# Starfait browser runtime
 
-The web shell expects `runtime/undertale-runner.js` to export either a named
-`createUndertaleRunner(options)` function or a default function with the same
-signature.
+The GitHub Pages workflow builds the Starfait `starfait-runner-web` Kotlin/Wasm
+library from the pinned upstream commit `2da1b9dd287fce70eae68a8e84b69816bdddd1a7`.
+It copies the generated `.mjs` and `.wasm` files into `runtime/starfait/` at
+deploy time; generated binaries are not committed to this repository.
 
-```js
-export async function createUndertaleRunner({
-  canvas,
-  archive,       // Uint8Array containing game.unx (or the joined archive parts)
-  saveStore,     // async get(key), set(key, value), delete(key), keys()
-  onStatus,      // optional status callback
-  onLog          // optional log callback
-}) {
-  return {
-    async start() {},
-    input(type, key) {}, // type is "keydown" or "keyup"
-    async stop() {}
-  };
-}
-```
+The client imports the generated Kotlin/Wasm module and calls these exported
+functions:
 
-This file is an interface contract only. It is not a game engine and does not
-contain Mollomm's code or binaries. A real runner must be separately sourced
-under terms that permit this use and tested against Undertale's exact build.
+- `createRunner(bundlePath, savePath, gameWADName, canvas)`
+- `startRunner(onExit)`
+- `onKeyDown(keyCode)`
+- `onKeyUp(keyCode)`
+- `resumeAudioContext()`
+
+The last function is a small build-time patch to Starfait's web source. It
+exposes the existing `WebAudioManager.resumeAudioContext()` so the page can
+resume browser audio after the user's first key press or canvas interaction.
+
+Game data and external audio are copied to OPFS before the runner starts.
+Starfait loads the files in the bundle directory as a flat virtual filesystem;
+therefore audio files from `mus/` are stored in OPFS by basename. The original
+`.ogg` files remain in the web deployment's `mus/` folder.
+
+Starfait is licensed under Apache License 2.0. See `THIRD_PARTY_NOTICES.md` and
+the deployed `third-party/STARFAIT-LICENSE.txt`.

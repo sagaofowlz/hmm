@@ -1,29 +1,37 @@
 "use strict";
 
-// Resolve URLs relative to this script so the GitHub Pages project path (/hmm/) works.
-// The archive is served by the site itself. Visitors are never asked to upload it.
-// For split archives, list every part here in the correct order, e.g.
-// ["game.unx.part001", "game.unx.part002"].
-const ARCHIVE_PARTS = ["./game.unx"];
-const RUNNER_MODULE = "./runtime/undertale-runner.js";
+// Starfait is an Undertale-focused GameMaker runner. The build workflow compiles
+// its Kotlin/Wasm browser module and writes the generated entry point to entry.json.
+const ASSET_MANIFEST = "./asset-manifest.json";
+const STARFAIT_ENTRY = "./runtime/starfait/entry.json";
+const OPFS_BUNDLE_DIR = "hmm-undertale-bundle";
+const OPFS_SAVE_DIR = "hmm-undertale-saves";
+const OPFS_META_DIR = "hmm-undertale-meta";
 
 const $ = (id) => document.getElementById(id);
 const canvas = $("game-canvas");
-let runner = null;
-let databasePromise = null;
+const debugPanel = $("debug-panel");
+const debugToggle = $("debug-toggle");
+let starfait = null;
+let runnerStarted = false;
+let audioUnlocked = false;
+let startPromise = null;
+const heldKeys = new Set();
 
 function log(message) {
-  const output = $("console-output");
-  output.textContent += "\n" + String(message);
+  const output = $("debug-output");
+  const time = new Date().toLocaleTimeString();
+  output.textContent += "\n[" + time + "] " + String(message);
   output.scrollTop = output.scrollHeight;
 }
 
-function setStatus(message, kind = "") {
-  $("status-text").textContent = message;
-  $("loading-message").textContent = message;
-  const dot = $("status-dot");
-  dot.className = "status-dot" + (kind ? " " + kind : "");
-  log(message);
+function setDebugVisible(visible) {
+  debugPanel.hidden = !visible;
+  debugToggle.setAttribute("aria-expanded", String(visible));
+}
+
+function toggleDebug() {
+  setDebugVisible(debugPanel.hidden);
 }
 
 function describeError(error) {
@@ -31,214 +39,258 @@ function describeError(error) {
   return [error.name, error.message].filter(Boolean).join(": ");
 }
 
-function openSaveDatabase() {
-  if (databasePromise) return databasePromise;
-  databasePromise = new Promise((resolve, reject) => {
-    if (!("indexedDB" in window)) {
-      reject(new Error("This browser does not support IndexedDB save storage."));
-      return;
+async function fetchJson(path) {
+  const response = await fetch(new URL(path, import.meta.url), { cache: "no-store" });
+  if (!response.ok) throw new Error("Could not load " + path + " (HTTP " + response.status + ").");
+  return response.json();
+}
+
+async function loadStarfaitModule() {
+  const entryInfo = await fetchJson(STARFAIT_ENTRY);
+  if (typeof entryInfo.entry !== "string" || entryInfo.entry.includes("..")) {
+    throw new Error("Starfait build did not provide a valid module entry point.");
+  }
+
+  const moduleUrl = new URL("./runtime/starfait/" + entryInfo.entry, import.meta.url);
+  const namespace = await import(moduleUrl.href);
+  const api = namespace.default || namespace;
+  const required = ["createRunner", "startRunner", "onKeyDown", "onKeyUp", "resumeAudioContext"];
+  const missing = required.filter((name) => typeof api[name] !== "function");
+  if (missing.length) throw new Error("Starfait module is missing exports: " + missing.join(", "));
+  log("Starfait WebAssembly module loaded.");
+  return api;
+}
+
+async function getDirectory(parent, name) {
+  return parent.getDirectoryHandle(name, { create: true });
+}
+
+async function writeOPFSFile(directory, name, bytes) {
+  const handle = await directory.getFileHandle(name, { create: true });
+  const writable = await handle.createWritable();
+  try {
+    await writable.write(bytes);
+    await writable.close();
+  } catch (error) {
+    try { await writable.abort(); } catch (_) {}
+    throw error;
+  }
+}
+
+async function fileHasExpectedSize(directory, item) {
+  try {
+    const file = await (await directory.getFileHandle(item.name)).getFile();
+    return file.size === item.size;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function isBundleCached(bundleDirectory, metaDirectory, manifest, items) {
+  try {
+    const versionFile = await (await metaDirectory.getFileHandle("asset-version.txt")).getFile();
+    const version = (await versionFile.text()).trim();
+    if (!manifest.version || version !== manifest.version) return false;
+    for (const item of items) {
+      if (!(await fileHasExpectedSize(bundleDirectory, item))) return false;
     }
-    const request = indexedDB.open("hmm-webport-saves", 1);
-    request.onupgradeneeded = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains("files")) db.createObjectStore("files");
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error || new Error("Could not open save database."));
-    request.onblocked = () => log("Save database upgrade is blocked by another open tab.");
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function makeAssetUrl(path) {
+  const safePath = path.split("/").map((part) => encodeURIComponent(part)).join("/");
+  return new URL("./" + safePath, import.meta.url);
+}
+
+async function downloadAsset(item, bundleDirectory, label, index, total) {
+  const response = await fetch(makeAssetUrl(item.path), { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error("Could not download " + item.path + " (HTTP " + response.status + ").");
+  }
+  const bytes = await response.arrayBuffer();
+  if (item.size != null && bytes.byteLength !== item.size) {
+    throw new Error("Size mismatch for " + item.path + ": expected " + item.size + ", got " + bytes.byteLength + ".");
+  }
+  await writeOPFSFile(bundleDirectory, item.name, bytes);
+  log("Cached " + label + " " + (index + 1) + "/" + total + ": " + item.name + " (" + bytes.byteLength.toLocaleString() + " bytes).");
+}
+
+async function cacheGameAssets(manifest, rootDirectory) {
+  if (!manifest.game || manifest.game.name !== "game.unx") {
+    throw new Error("This build has no game.unx archive. The site is configured for automatic loading and will not ask visitors to import files.");
+  }
+
+  if (!Array.isArray(manifest.music)) throw new Error("The asset manifest has an invalid music list.");
+  const music = manifest.music.map((item) => {
+    if (!item || typeof item.path !== "string" || typeof item.name !== "string" || item.name.includes("/") || item.name.includes("\\")) {
+      throw new Error("The asset manifest contains an invalid music entry.");
+    }
+    return item;
   });
-  return databasePromise;
-}
 
-function createSaveStore(db) {
-  function request(mode, operation) {
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction("files", mode);
-      const store = tx.objectStore("files");
-      let result;
-      try { result = operation(store); }
-      catch (error) { reject(error); return; }
-      tx.oncomplete = () => resolve(result && "result" in result ? result.result : result);
-      tx.onerror = () => reject(tx.error || new Error("Save database transaction failed."));
-      tx.onabort = () => reject(tx.error || new Error("Save database transaction was aborted."));
-    });
-  }
-  return Object.freeze({
-    get: (key) => request("readonly", (store) => store.get(String(key))),
-    set: (key, value) => request("readwrite", (store) => store.put(value, String(key))),
-    delete: (key) => request("readwrite", (store) => store.delete(String(key))),
-    keys: () => request("readonly", (store) => store.getAllKeys())
-  });
-}
+  const items = [manifest.game, ...music];
+  const expectedNames = new Set(items.map((item) => item.name));
+  if (expectedNames.size !== items.length) throw new Error("Two game assets have the same filename; the bundle cannot safely flatten them.");
 
-async function readResponse(response, partIndex, partCount) {
-  const declaredLength = Number(response.headers.get("content-length")) || 0;
-  if (!response.body || !response.body.getReader) {
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    $("download-progress").removeAttribute("value");
-    return bytes;
+  const bundleDirectory = await getDirectory(rootDirectory, OPFS_BUNDLE_DIR);
+  const metaDirectory = await getDirectory(rootDirectory, OPFS_META_DIR);
+
+  if (await isBundleCached(bundleDirectory, metaDirectory, manifest, items)) {
+    log("Game files already exist in this browser's private storage; skipping download.");
+    return bundleDirectory;
   }
-  const reader = response.body.getReader();
-  const chunks = [];
-  let loaded = 0;
-  while (true) {
-    const result = await reader.read();
-    if (result.done) break;
-    chunks.push(result.value);
-    loaded += result.value.byteLength;
-    if (declaredLength > 0 && partCount === 1) {
-      $("download-progress").value = Math.min(100, Math.round((loaded / declaredLength) * 100));
-      setStatus("Downloading game archive… " + Math.round((loaded / declaredLength) * 100) + "%");
-    } else {
-      setStatus("Downloading archive part " + (partIndex + 1) + " of " + partCount + "…");
+
+  log("Preparing the game files in Origin Private File System…");
+  const total = items.length;
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    await downloadAsset(item, bundleDirectory, item === manifest.game ? "game archive" : "audio file", index, total);
+  }
+
+  // Remove files left by an older asset set so Starfait only sees this build's files.
+  for await (const [name, handle] of bundleDirectory.entries()) {
+    if (handle.kind === "file" && !expectedNames.has(name)) {
+      await bundleDirectory.removeEntry(name);
     }
   }
-  const output = new Uint8Array(loaded);
-  let offset = 0;
-  for (const chunk of chunks) {
-    output.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return output;
+
+  const encoder = new TextEncoder();
+  await writeOPFSFile(metaDirectory, "asset-version.txt", encoder.encode(String(manifest.version || "")));
+  log("Game assets are cached persistently in this browser.");
+  return bundleDirectory;
 }
 
-async function loadArchive() {
-  const parts = [];
-  let totalBytes = 0;
-  for (let index = 0; index < ARCHIVE_PARTS.length; index += 1) {
-    const path = ARCHIVE_PARTS[index];
-    setStatus("Looking for " + path + "…");
-    const url = new URL(path, import.meta.url);
-    const response = await fetch(url, { cache: "no-store" });
-    if (!response.ok) {
-      if (response.status === 404) {
-        throw new Error("Game archive not found. The site expects " + path + " beside index.html.");
-      }
-      throw new Error("Could not fetch " + path + " (HTTP " + response.status + ").");
-    }
-    const bytes = await readResponse(response, index, ARCHIVE_PARTS.length);
-    if (bytes.byteLength === 0) throw new Error(path + " is empty.");
-    parts.push(bytes);
-    totalBytes += bytes.byteLength;
-    log("Loaded " + path + " (" + bytes.byteLength.toLocaleString() + " bytes).");
+async function unlockAudioFromUserGesture() {
+  if (!starfait || audioUnlocked) return;
+  try {
+    starfait.resumeAudioContext();
+    audioUnlocked = true;
+    log("Browser audio context resumed.");
+  } catch (error) {
+    log("Audio resume will be retried after another key press: " + describeError(error));
   }
-  const archive = new Uint8Array(totalBytes);
-  let offset = 0;
-  for (const part of parts) {
-    archive.set(part, offset);
-    offset += part.byteLength;
-  }
-  $("download-progress").value = 100;
-  return archive;
 }
 
 async function startGame() {
-  try {
-    setStatus("Checking for game archive…");
-    const archive = await loadArchive();
-    log("Game archive loaded: " + archive.byteLength.toLocaleString() + " bytes.");
-
-    setStatus("Opening persistent save storage…");
-    const db = await openSaveDatabase();
-    const saveStore = createSaveStore(db);
-
-    setStatus("Checking for compatible Undertale browser runner…");
-    let runnerModule;
+  if (startPromise) return startPromise;
+  startPromise = (async () => {
     try {
-      runnerModule = await import(RUNNER_MODULE);
-    } catch (error) {
-      if (error && (error.code === "ERR_MODULE_NOT_FOUND" || error.message?.includes("Failed to fetch") || error.message?.includes("Importing a module script failed"))) {
-        throw new Error("The game archive is present, but the compatible browser runner has not been added yet.");
+      log("Starting Undertale webport…");
+      starfait = await loadStarfaitModule();
+
+      const manifest = await fetchJson(ASSET_MANIFEST);
+      if (!manifest || typeof manifest !== "object") throw new Error("Invalid game asset manifest.");
+      log("Asset manifest loaded.");
+
+      if (!navigator.storage?.getDirectory) {
+        throw new Error("This browser does not support Origin Private File System (OPFS).");
       }
+      const rootDirectory = await navigator.storage.getDirectory();
+      try {
+        const persistent = await navigator.storage.persist?.();
+        log(persistent ? "Persistent browser storage granted." : "Browser storage is available; persistence may depend on browser policy.");
+      } catch (_) {
+        log("Could not request persistent storage; using OPFS with browser defaults.");
+      }
+
+      const bundleDirectory = await cacheGameAssets(manifest, rootDirectory);
+      await getDirectory(rootDirectory, OPFS_SAVE_DIR);
+
+      log("Creating Starfait runner for game.unx (Undertale v1.08 / WAD 16 target)…");
+      const result = await starfait.createRunner(
+        OPFS_BUNDLE_DIR,
+        OPFS_SAVE_DIR,
+        "game.unx",
+        canvas
+      );
+      if (result === false) throw new Error("Starfait refused to initialise the game archive.");
+
+      starfait.startRunner(() => log("Starfait game loop ended."));
+      runnerStarted = true;
+      canvas.focus();
+      log("Runner started. Keyboard input is ready.");
+    } catch (error) {
+      const message = describeError(error);
+      log("BOOT ERROR: " + message);
+      if (error?.stack) log(error.stack);
+      setDebugVisible(true);
       throw error;
     }
-
-    const createRunner = runnerModule.createUndertaleRunner || runnerModule.default;
-    if (typeof createRunner !== "function") {
-      throw new Error("runtime/undertale-runner.js must export createUndertaleRunner().");
-    }
-
-    runner = await createRunner({
-      canvas,
-      archive,
-      saveStore,
-      onStatus: (message) => setStatus(message),
-      onLog: (message) => log(message)
-    });
-    if (!runner || typeof runner.start !== "function") {
-      throw new Error("Runner adapter must return an object with start().");
-    }
-    await runner.start();
-    $("loading-overlay").hidden = true;
-    setStatus("Game running.", "good");
-    canvas.focus();
-  } catch (error) {
-    const message = describeError(error);
-    setStatus(message, "bad");
-    log("BOOT ERROR: " + (error.stack || message));
-    $("loading-message").textContent = message;
-    $("loading-overlay").hidden = false;
-    $("download-progress").hidden = true;
-  }
+  })();
+  return startPromise;
 }
 
-function sendInput(type, key) {
-  if (!runner) return;
-  try {
-    if (typeof runner.input === "function") runner.input(type, key);
-    else if (type === "keydown" && typeof runner.keyDown === "function") runner.keyDown(key);
-    else if (type === "keyup" && typeof runner.keyUp === "function") runner.keyUp(key);
-  } catch (error) {
-    log("Input error: " + describeError(error));
-  }
+const FALLBACK_KEY_CODES = {
+  ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40,
+  Enter: 13, ShiftLeft: 16, ShiftRight: 16, ControlLeft: 17, ControlRight: 17,
+  Escape: 27, Space: 32, Tab: 9,
+  KeyZ: 90, KeyX: 88, KeyC: 67,
+  KeyW: 87, KeyA: 65, KeyS: 83, KeyD: 68
+};
+
+function getGameKeyCode(event) {
+  const code = Number(event.keyCode || event.which || FALLBACK_KEY_CODES[event.code] || 0);
+  return Number.isInteger(code) && code > 0 && code < 256 ? code : 0;
 }
 
-function normaliseKey(key) {
-  return key.length === 1 ? key.toLowerCase() : key;
+function sendKeyDown(code) {
+  if (!code || !runnerStarted || !starfait || heldKeys.has(code)) return;
+  heldKeys.add(code);
+  starfait.onKeyDown(code);
+}
+
+function sendKeyUp(code) {
+  if (!code || !heldKeys.has(code)) return;
+  heldKeys.delete(code);
+  if (runnerStarted && starfait) starfait.onKeyUp(code);
 }
 
 window.addEventListener("keydown", (event) => {
-  const key = normaliseKey(event.key);
-  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " "].includes(event.key)) event.preventDefault();
-  sendInput("keydown", key);
-});
-window.addEventListener("keyup", (event) => sendInput("keyup", normaliseKey(event.key)));
-window.addEventListener("blur", () => {
-  ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "z", "x", "Enter", "Shift"].forEach((key) => sendInput("keyup", key));
-});
-
-document.querySelectorAll("[data-key]").forEach((button) => {
-  const key = button.dataset.key;
-  const release = (event) => {
-    if (event) event.preventDefault();
-    button.classList.remove("pressed");
-    sendInput("keyup", key);
-  };
-  button.addEventListener("pointerdown", (event) => {
+  if (event.key === "F1") {
     event.preventDefault();
-    button.classList.add("pressed");
-    try { button.setPointerCapture(event.pointerId); } catch (_) {}
-    sendInput("keydown", key);
-  });
-  button.addEventListener("pointerup", release);
-  button.addEventListener("pointercancel", release);
-  button.addEventListener("lostpointercapture", release);
-  button.addEventListener("contextmenu", (event) => event.preventDefault());
+    toggleDebug();
+    return;
+  }
+  if (event.key === "F2") {
+    event.preventDefault();
+    if (!document.fullscreenElement) {
+      $("stage").requestFullscreen?.().catch((error) => log("Fullscreen error: " + describeError(error)));
+    } else {
+      document.exitFullscreen?.().catch((error) => log("Fullscreen error: " + describeError(error)));
+    }
+    return;
+  }
+
+  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " ", "Tab"].includes(event.key)) {
+    event.preventDefault();
+  }
+  if (!audioUnlocked && starfait) unlockAudioFromUserGesture();
+  sendKeyDown(getGameKeyCode(event));
 });
 
-$("fullscreen-button").addEventListener("click", async () => {
-  try {
-    if (!document.fullscreenElement) await $("game-canvas").parentElement.requestFullscreen();
-    else await document.exitFullscreen();
-  } catch (error) { log("Fullscreen unavailable: " + describeError(error)); }
-});
-$("console-button").addEventListener("click", () => {
-  const panel = $("console-panel");
-  panel.hidden = !panel.hidden;
-  $("console-button").setAttribute("aria-expanded", String(!panel.hidden));
+window.addEventListener("keyup", (event) => sendKeyUp(getGameKeyCode(event)));
+
+window.addEventListener("blur", () => {
+  for (const code of [...heldKeys]) sendKeyUp(code);
 });
 
-log("Automatic archive loading is enabled (game.unx).");
-log("Save storage uses IndexedDB.");
-log("Runner module expected at " + RUNNER_MODULE + ".");
-startGame();
+canvas.addEventListener("pointerdown", () => {
+  canvas.focus();
+  if (!audioUnlocked && starfait) unlockAudioFromUserGesture();
+});
+canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+
+debugToggle.addEventListener("click", (event) => {
+  event.stopPropagation();
+  toggleDebug();
+});
+
+if (new URLSearchParams(location.search).get("debug") === "1") setDebugVisible(true);
+
+log("Keyboard: arrows / WASD, Z / Enter to confirm, X / Shift to cancel.");
+log("F1 = debug log. F2 = fullscreen.");
+log("Game files and saves use OPFS. Runner: Starfait.");
+startGame().catch(() => {});

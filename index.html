@@ -4,56 +4,20 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#000000">
-  <meta name="description" content="Undertale browser port shell">
-  <title>UNDERTALE — WEBPORT</title>
+  <meta name="description" content="Undertale browser game window">
+  <title>UNDERTALE</title>
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">UNDERTALE <span>WEBPORT</span></div>
-    <div class="top-actions">
-      <button id="fullscreen-button" class="small-button" type="button">FULLSCREEN</button>
-      <button id="console-button" class="small-button" type="button" aria-expanded="false">CONSOLE</button>
-    </div>
-  </header>
+  <main id="stage" aria-label="Undertale game window">
+    <canvas id="game-canvas" width="640" height="480" tabindex="0" aria-label="Game screen"></canvas>
 
-  <main>
-    <section class="game-frame" aria-label="Game viewport">
-      <canvas id="game-canvas" width="640" height="480" tabindex="0" aria-label="Undertale game screen"></canvas>
-      <div id="loading-overlay" class="loading-overlay">
-        <div class="heart" aria-hidden="true">♥</div>
-        <h1>UNDERTALE</h1>
-        <p class="determination">DETERMINATION.</p>
-        <p id="loading-message" class="loading-message" role="status" aria-live="polite">Checking for game archive…</p>
-        <progress id="download-progress" max="100" value="0"></progress>
-      </div>
-    </section>
-
-    <section class="status-row" aria-live="polite">
-      <span class="status-dot" id="status-dot"></span>
-      <span id="status-text">Initialising webport…</span>
-    </section>
-
-    <section class="touch-panel" aria-label="Touch controls">
-      <div class="dpad">
-        <button class="touch-key up" data-key="ArrowUp" type="button" aria-label="Up">▲</button>
-        <button class="touch-key left" data-key="ArrowLeft" type="button" aria-label="Left">◀</button>
-        <button class="touch-key down" data-key="ArrowDown" type="button" aria-label="Down">▼</button>
-        <button class="touch-key right" data-key="ArrowRight" type="button" aria-label="Right">▶</button>
-      </div>
-      <div class="action-keys">
-        <button class="touch-key" data-key="x" type="button">X <small>CANCEL</small></button>
-        <button class="touch-key confirm" data-key="z" type="button">Z <small>CONFIRM</small></button>
-      </div>
-    </section>
-
-    <section id="console-panel" class="console-panel" hidden>
-      <div class="console-heading">WEBPORT LOG</div>
-      <pre id="console-output">Webport shell initialised.</pre>
+    <button id="debug-toggle" type="button" aria-label="Toggle debug log" aria-expanded="false" title="Debug (F1)">DBG</button>
+    <section id="debug-panel" aria-label="Debug log" hidden>
+      <div class="debug-title">WEBPORT DEBUG <span>F1</span></div>
+      <pre id="debug-output">Starting webport…</pre>
     </section>
   </main>
-
-  <footer>Fan project. Not affiliated with Toby Fox or the Undertale publishers.</footer>
   <script type="module" src="./app.js"></script>
 </body>
 </html>
