@@ -1,0 +1,4 @@
+# Game archives are deliberately excluded from accidental public commits.
+/game.unx
+/game.unx.part*
+/data.win
