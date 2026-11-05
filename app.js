@@ -164,7 +164,7 @@ async function cacheGameAssets(manifest, rootDirectory) {
 }
 
 async function unlockAudioFromUserGesture() {
-  if (!starfait || audioUnlocked) return;
+  if (!runnerStarted || !starfait || audioUnlocked) return;
   try {
     starfait.resumeAudioContext();
     audioUnlocked = true;
