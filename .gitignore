@@ -1,6 +1,3 @@
 # Game assets are kept out of accidental commits. Only add files to a public
 # Pages deployment when you have permission to distribute/host those assets.
-/game.unx
-/game.unx.part*
-/data.win
-/mus/
+
