@@ -1,6 +1,49 @@
 
 "use strict";
 
+// iPad Safari compatibility: async iterator disposal.
+if (typeof Symbol.asyncDispose !== "symbol") {
+  Object.defineProperty(Symbol, "asyncDispose", {
+    configurable: true,
+    value: Symbol.for("Symbol.asyncDispose")
+  });
+}
+
+if (globalThis.FileSystemDirectoryHandle) {
+  const directoryPrototype = FileSystemDirectoryHandle.prototype;
+  const originalValues = directoryPrototype.values;
+
+  if (
+    typeof originalValues === "function" &&
+    !directoryPrototype.__hmmAsyncDisposePatched
+  ) {
+    Object.defineProperty(directoryPrototype, "__hmmAsyncDisposePatched", {
+      value: true
+    });
+
+    directoryPrototype.values = function (...args) {
+      const iterator = originalValues.apply(this, args);
+      const disposeSymbol = Symbol.asyncDispose;
+
+      if (
+        iterator &&
+        typeof iterator[disposeSymbol] !== "function"
+      ) {
+        Object.defineProperty(iterator, disposeSymbol, {
+          configurable: true,
+          value() {
+            return typeof this.return === "function"
+              ? this.return()
+              : Promise.resolve();
+          }
+        });
+      }
+
+      return iterator;
+    };
+  }
+}
+
 const ASSET_MANIFEST = "./asset-manifest.json";
 const STARFAIT_ENTRY = "./runtime/starfait/entry.json";
 const OPFS_BUNDLE_DIR = "hmm-undertale-bundle";
@@ -532,7 +575,6 @@ async function startGame() {
         log("Stack could not be read.");
       }
 
-      // Read the diagnostic captured inside Kotlin/Wasm.
       if (startupStage === "Starfait createRunner") {
         try {
           if (
@@ -543,8 +585,7 @@ async function startGame() {
             log(starfait.getCreateRunnerDiagnostic());
           } else {
             log(
-              "Starfait internal diagnostic export unavailable. " +
-              "The Kotlin-side diagnostic patch is not installed yet."
+              "Starfait internal diagnostic export unavailable."
             );
           }
         } catch (diagnosticError) {
