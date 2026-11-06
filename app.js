@@ -1,7 +1,6 @@
 
 "use strict";
 
-// Starfait is an Undertale-focused GameMaker runner.
 const ASSET_MANIFEST = "./asset-manifest.json";
 const STARFAIT_ENTRY = "./runtime/starfait/entry.json";
 const OPFS_BUNDLE_DIR = "hmm-undertale-bundle";
@@ -65,6 +64,44 @@ function describeThrownValue(error) {
       (JSON.stringify(error) || Object.prototype.toString.call(error));
   } catch (_) {
     return "Raw thrown value: [unserializable]";
+  }
+}
+
+// Temporarily forward Starfait's console output into the debug panel.
+async function captureStarfaitOutput(callback) {
+  const methods = ["log", "info", "warn", "error", "debug"];
+  const originals = {};
+
+  function formatArgument(value) {
+    if (typeof value === "string") return value;
+
+    try {
+      if (value instanceof Error) {
+        return value.stack || value.message;
+      }
+
+      return JSON.stringify(value);
+    } catch (_) {
+      return String(value);
+    }
+  }
+
+  for (const method of methods) {
+    originals[method] = console[method];
+
+    console[method] = function (...args) {
+      log("[Starfait console." + method + "] " +
+        args.map(formatArgument).join(" "));
+      return originals[method].apply(console, args);
+    };
+  }
+
+  try {
+    return await callback();
+  } finally {
+    for (const method of methods) {
+      console[method] = originals[method];
+    }
   }
 }
 
@@ -187,9 +224,7 @@ async function downloadAsset(item, bundleDirectory, label, index, total) {
 
 async function cacheGameAssets(manifest, rootDirectory) {
   if (!manifest.game || manifest.game.name !== "game.unx") {
-    throw new Error(
-      "This build has no game.unx archive. The site is configured for automatic loading."
-    );
+    throw new Error("This build has no game.unx archive.");
   }
 
   if (!Array.isArray(manifest.music)) {
@@ -225,9 +260,7 @@ async function cacheGameAssets(manifest, rootDirectory) {
     return bundleDirectory;
   }
 
-  log("Preparing the game files in Origin Private File System…");
-
-  const total = items.length;
+  log("Preparing game files in OPFS…");
 
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index];
@@ -237,7 +270,7 @@ async function cacheGameAssets(manifest, rootDirectory) {
       bundleDirectory,
       item === manifest.game ? "game archive" : "audio file",
       index,
-      total
+      items.length
     );
   }
 
@@ -247,15 +280,13 @@ async function cacheGameAssets(manifest, rootDirectory) {
     }
   }
 
-  const encoder = new TextEncoder();
-
   await writeOPFSFile(
     metaDirectory,
     "asset-version.txt",
-    encoder.encode(String(manifest.version || ""))
+    new TextEncoder().encode(String(manifest.version || ""))
   );
 
-  log("Game assets are cached persistently in this browser.");
+  log("Game assets cached.");
   return bundleDirectory;
 }
 
@@ -267,7 +298,7 @@ async function unlockAudioFromUserGesture() {
     audioUnlocked = true;
     log("Browser audio context resumed.");
   } catch (error) {
-    log("Audio resume will be retried: " + describeError(error));
+    log("Audio resume error: " + describeError(error));
   }
 }
 
@@ -293,7 +324,7 @@ async function startGame() {
       startupStage = "checking OPFS support";
 
       if (!navigator.storage?.getDirectory) {
-        throw new Error("This browser does not support Origin Private File System (OPFS).");
+        throw new Error("This browser does not support OPFS.");
       }
 
       startupStage = "opening OPFS storage";
@@ -318,18 +349,21 @@ async function startGame() {
       await getDirectory(rootDirectory, OPFS_SAVE_DIR);
 
       startupStage = "Starfait createRunner";
-      log("Creating Starfait runner for game.unx (Undertale v1.08 / WAD 16 target)…");
-
+      log("Creating Starfait runner…");
       log("Browser: " + navigator.userAgent);
       log("WebAssembly: " + typeof WebAssembly);
       log("WebGL2: " + Boolean(canvas.getContext("webgl2")));
 
-      const result = await starfait.createRunner(
-        OPFS_BUNDLE_DIR,
-        OPFS_SAVE_DIR,
-        "game.unx",
-        canvas
+      const result = await captureStarfaitOutput(() =>
+        starfait.createRunner(
+          OPFS_BUNDLE_DIR,
+          OPFS_SAVE_DIR,
+          "game.unx",
+          canvas
+        )
       );
+
+      log("Starfait createRunner returned: " + String(result));
 
       if (result === false) {
         throw new Error("Starfait refused to initialise the game archive.");
