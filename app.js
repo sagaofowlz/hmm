@@ -68,7 +68,6 @@ function describeThrownValue(error) {
   }
 }
 
-// Convert console arguments into readable strings.
 function formatConsoleArgument(value) {
   if (typeof value === "string") return value;
 
@@ -91,21 +90,12 @@ function formatConsoleArgument(value) {
   }
 }
 
-// Install BEFORE importing Starfait.
-// This is important because Kotlin/Wasm may capture console methods
-// while its generated JavaScript module is being evaluated.
 function captureStarfaitConsole() {
   if (window.__hmmConsoleCaptureInstalled) return;
 
   window.__hmmConsoleCaptureInstalled = true;
 
-  const methods = [
-    "log",
-    "info",
-    "warn",
-    "error",
-    "debug"
-  ];
+  const methods = ["log", "info", "warn", "error", "debug"];
 
   for (const method of methods) {
     const original = console[method];
@@ -129,7 +119,6 @@ function captureStarfaitConsole() {
     }
   }
 
-  // Also capture global JavaScript errors.
   window.addEventListener("error", (event) => {
     log(
       "[JavaScript window error] " +
@@ -141,20 +130,14 @@ function captureStarfaitConsole() {
     }
   });
 
-  // Capture unhandled promise rejections.
   window.addEventListener("unhandledrejection", (event) => {
-    log(
-      "[Unhandled rejection] " +
-      describeError(event.reason)
-    );
-
+    log("[Unhandled rejection] " + describeError(event.reason));
     log(describeThrownValue(event.reason));
   });
 
   log("Starfait console interception installed before module import.");
 }
 
-// Install immediately, before loadStarfaitModule() runs.
 captureStarfaitConsole();
 
 async function fetchJson(path) {
@@ -341,15 +324,11 @@ async function downloadAsset(
 
 async function cacheGameAssets(manifest, rootDirectory) {
   if (!manifest.game || manifest.game.name !== "game.unx") {
-    throw new Error(
-      "This build has no game.unx archive."
-    );
+    throw new Error("This build has no game.unx archive.");
   }
 
   if (!Array.isArray(manifest.music)) {
-    throw new Error(
-      "The asset manifest has an invalid music list."
-    );
+    throw new Error("The asset manifest has an invalid music list.");
   }
 
   const music = manifest.music.map((item) => {
@@ -375,9 +354,7 @@ async function cacheGameAssets(manifest, rootDirectory) {
   );
 
   if (expectedNames.size !== items.length) {
-    throw new Error(
-      "Two game assets have the same filename."
-    );
+    throw new Error("Two game assets have the same filename.");
   }
 
   const bundleDirectory = await getDirectory(
@@ -413,9 +390,7 @@ async function cacheGameAssets(manifest, rootDirectory) {
     await downloadAsset(
       item,
       bundleDirectory,
-      item === manifest.game
-        ? "game archive"
-        : "audio file",
+      item === manifest.game ? "game archive" : "audio file",
       index,
       items.length
     );
@@ -450,15 +425,10 @@ async function unlockAudioFromUserGesture() {
 
   try {
     starfait.resumeAudioContext();
-
     audioUnlocked = true;
-
     log("Browser audio context resumed.");
   } catch (error) {
-    log(
-      "Audio resume error: " +
-      describeError(error)
-    );
+    log("Audio resume error: " + describeError(error));
   }
 }
 
@@ -470,11 +440,9 @@ async function startGame() {
       log("Starting Undertale webport…");
 
       startupStage = "loading Starfait module";
-
       starfait = await loadStarfaitModule();
 
       startupStage = "loading asset manifest";
-
       const manifest = await fetchJson(ASSET_MANIFEST);
 
       if (!manifest || typeof manifest !== "object") {
@@ -492,7 +460,6 @@ async function startGame() {
       }
 
       startupStage = "opening OPFS storage";
-
       const rootDirectory = await navigator.storage.getDirectory();
 
       try {
@@ -511,11 +478,9 @@ async function startGame() {
       }
 
       startupStage = "caching game assets";
-
       await cacheGameAssets(manifest, rootDirectory);
 
       startupStage = "opening save directory";
-
       await getDirectory(rootDirectory, OPFS_SAVE_DIR);
 
       startupStage = "Starfait createRunner";
@@ -523,14 +488,10 @@ async function startGame() {
       log("Creating Starfait runner…");
       log("Browser: " + navigator.userAgent);
       log("WebAssembly: " + typeof WebAssembly);
-      log(
-        "WebGL2: " +
-        Boolean(canvas.getContext("webgl2"))
-      );
+      log("WebGL2: " + Boolean(canvas.getContext("webgl2")));
 
       log("Calling Starfait createRunner now…");
 
-      // Console interception is already active before the module import.
       const result = await starfait.createRunner(
         OPFS_BUNDLE_DIR,
         OPFS_SAVE_DIR,
@@ -538,10 +499,7 @@ async function startGame() {
         canvas
       );
 
-      log(
-        "Starfait createRunner returned: " +
-        String(result)
-      );
+      log("Starfait createRunner returned: " + String(result));
 
       if (result === false) {
         throw new Error(
@@ -556,7 +514,6 @@ async function startGame() {
       );
 
       runnerStarted = true;
-
       canvas.focus();
 
       log("Runner started. Keyboard input is ready.");
@@ -575,8 +532,30 @@ async function startGame() {
         log("Stack could not be read.");
       }
 
-      setDebugVisible(true);
+      // Read the diagnostic captured inside Kotlin/Wasm.
+      if (startupStage === "Starfait createRunner") {
+        try {
+          if (
+            starfait &&
+            typeof starfait.getCreateRunnerDiagnostic === "function"
+          ) {
+            log("Starfait internal diagnostic:");
+            log(starfait.getCreateRunnerDiagnostic());
+          } else {
+            log(
+              "Starfait internal diagnostic export unavailable. " +
+              "The Kotlin-side diagnostic patch is not installed yet."
+            );
+          }
+        } catch (diagnosticError) {
+          log(
+            "Could not read Starfait internal diagnostic: " +
+            describeError(diagnosticError)
+          );
+        }
+      }
 
+      setDebugVisible(true);
       throw error;
     }
   })();
@@ -632,7 +611,6 @@ function sendKeyDown(code) {
   }
 
   heldKeys.add(code);
-
   starfait.onKeyDown(code);
 }
 
@@ -658,17 +636,11 @@ window.addEventListener("keydown", (event) => {
 
     if (!document.fullscreenElement) {
       $("stage").requestFullscreen?.().catch((error) =>
-        log(
-          "Fullscreen error: " +
-          describeError(error)
-        )
+        log("Fullscreen error: " + describeError(error))
       );
     } else {
       document.exitFullscreen?.().catch((error) =>
-        log(
-          "Fullscreen error: " +
-          describeError(error)
-        )
+        log("Fullscreen error: " + describeError(error))
       );
     }
 
