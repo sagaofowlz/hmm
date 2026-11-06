@@ -23,6 +23,7 @@ const heldKeys = new Set();
 function log(message) {
   const output = $("debug-output");
   const time = new Date().toLocaleTimeString();
+
   output.textContent += "\n[" + time + "] " + String(message);
   output.scrollTop = output.scrollHeight;
 }
@@ -67,43 +68,94 @@ function describeThrownValue(error) {
   }
 }
 
-// Temporarily forward Starfait's console output into the debug panel.
-async function captureStarfaitOutput(callback) {
-  const methods = ["log", "info", "warn", "error", "debug"];
-  const originals = {};
+// Convert console arguments into readable strings.
+function formatConsoleArgument(value) {
+  if (typeof value === "string") return value;
 
-  function formatArgument(value) {
-    if (typeof value === "string") return value;
-
-    try {
-      if (value instanceof Error) {
-        return value.stack || value.message;
-      }
-
-      return JSON.stringify(value);
-    } catch (_) {
-      return String(value);
-    }
-  }
-
-  for (const method of methods) {
-    originals[method] = console[method];
-
-    console[method] = function (...args) {
-      log("[Starfait console." + method + "] " +
-        args.map(formatArgument).join(" "));
-      return originals[method].apply(console, args);
-    };
+  if (value instanceof Error) {
+    return value.stack || value.message || String(value);
   }
 
   try {
-    return await callback();
-  } finally {
-    for (const method of methods) {
-      console[method] = originals[method];
+    const result = JSON.stringify(value);
+
+    return result === undefined
+      ? String(value)
+      : result;
+  } catch (_) {
+    try {
+      return String(value);
+    } catch (_) {
+      return "[unprintable value]";
     }
   }
 }
+
+// Install BEFORE importing Starfait.
+// This is important because Kotlin/Wasm may capture console methods
+// while its generated JavaScript module is being evaluated.
+function captureStarfaitConsole() {
+  if (window.__hmmConsoleCaptureInstalled) return;
+
+  window.__hmmConsoleCaptureInstalled = true;
+
+  const methods = [
+    "log",
+    "info",
+    "warn",
+    "error",
+    "debug"
+  ];
+
+  for (const method of methods) {
+    const original = console[method];
+
+    if (typeof original !== "function") continue;
+
+    try {
+      console[method] = function (...args) {
+        log(
+          "[Starfait console." + method + "] " +
+          args.map(formatConsoleArgument).join(" ")
+        );
+
+        return original.apply(console, args);
+      };
+    } catch (error) {
+      log(
+        "Could not intercept console." + method + ": " +
+        formatConsoleArgument(error)
+      );
+    }
+  }
+
+  // Also capture global JavaScript errors.
+  window.addEventListener("error", (event) => {
+    log(
+      "[JavaScript window error] " +
+      (event.message || "Unknown error")
+    );
+
+    if (event.error) {
+      log("[JavaScript error detail] " + describeError(event.error));
+    }
+  });
+
+  // Capture unhandled promise rejections.
+  window.addEventListener("unhandledrejection", (event) => {
+    log(
+      "[Unhandled rejection] " +
+      describeError(event.reason)
+    );
+
+    log(describeThrownValue(event.reason));
+  });
+
+  log("Starfait console interception installed before module import.");
+}
+
+// Install immediately, before loadStarfaitModule() runs.
+captureStarfaitConsole();
 
 async function fetchJson(path) {
   const response = await fetch(new URL(path, import.meta.url), {
@@ -111,7 +163,10 @@ async function fetchJson(path) {
   });
 
   if (!response.ok) {
-    throw new Error("Could not load " + path + " (HTTP " + response.status + ").");
+    throw new Error(
+      "Could not load " + path +
+      " (HTTP " + response.status + ")."
+    );
   }
 
   return response.json();
@@ -120,11 +175,22 @@ async function fetchJson(path) {
 async function loadStarfaitModule() {
   const entryInfo = await fetchJson(STARFAIT_ENTRY);
 
-  if (typeof entryInfo.entry !== "string" || entryInfo.entry.includes("..")) {
-    throw new Error("Starfait build did not provide a valid module entry point.");
+  if (
+    typeof entryInfo.entry !== "string" ||
+    entryInfo.entry.includes("..")
+  ) {
+    throw new Error(
+      "Starfait build did not provide a valid module entry point."
+    );
   }
 
-  const moduleUrl = new URL("./runtime/starfait/" + entryInfo.entry, import.meta.url);
+  const moduleUrl = new URL(
+    "./runtime/starfait/" + entryInfo.entry,
+    import.meta.url
+  );
+
+  log("Importing Starfait module…");
+
   const namespace = await import(moduleUrl.href);
   const api = namespace.default || namespace;
 
@@ -136,22 +202,33 @@ async function loadStarfaitModule() {
     "resumeAudioContext"
   ];
 
-  const missing = required.filter((name) => typeof api[name] !== "function");
+  const missing = required.filter(
+    (name) => typeof api[name] !== "function"
+  );
 
   if (missing.length) {
-    throw new Error("Starfait module is missing exports: " + missing.join(", "));
+    throw new Error(
+      "Starfait module is missing exports: " +
+      missing.join(", ")
+    );
   }
 
   log("Starfait WebAssembly module loaded.");
+
   return api;
 }
 
 async function getDirectory(parent, name) {
-  return parent.getDirectoryHandle(name, { create: true });
+  return parent.getDirectoryHandle(name, {
+    create: true
+  });
 }
 
 async function writeOPFSFile(directory, name, bytes) {
-  const handle = await directory.getFileHandle(name, { create: true });
+  const handle = await directory.getFileHandle(name, {
+    create: true
+  });
+
   const writable = await handle.createWritable();
 
   try {
@@ -161,28 +238,44 @@ async function writeOPFSFile(directory, name, bytes) {
     try {
       await writable.abort();
     } catch (_) {}
+
     throw error;
   }
 }
 
 async function fileHasExpectedSize(directory, item) {
   try {
-    const file = await (await directory.getFileHandle(item.name)).getFile();
+    const file = await (
+      await directory.getFileHandle(item.name)
+    ).getFile();
+
     return file.size === item.size;
   } catch (_) {
     return false;
   }
 }
 
-async function isBundleCached(bundleDirectory, metaDirectory, manifest, items) {
+async function isBundleCached(
+  bundleDirectory,
+  metaDirectory,
+  manifest,
+  items
+) {
   try {
-    const versionFile = await (await metaDirectory.getFileHandle("asset-version.txt")).getFile();
+    const versionFile = await (
+      await metaDirectory.getFileHandle("asset-version.txt")
+    ).getFile();
+
     const version = (await versionFile.text()).trim();
 
-    if (!manifest.version || version !== manifest.version) return false;
+    if (!manifest.version || version !== manifest.version) {
+      return false;
+    }
 
     for (const item of items) {
-      if (!(await fileHasExpectedSize(bundleDirectory, item))) return false;
+      if (!(await fileHasExpectedSize(bundleDirectory, item))) {
+        return false;
+      }
     }
 
     return true;
@@ -192,20 +285,38 @@ async function isBundleCached(bundleDirectory, metaDirectory, manifest, items) {
 }
 
 function makeAssetUrl(path) {
-  const safePath = path.split("/").map((part) => encodeURIComponent(part)).join("/");
+  const safePath = path
+    .split("/")
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+
   return new URL("./" + safePath, import.meta.url);
 }
 
-async function downloadAsset(item, bundleDirectory, label, index, total) {
-  const response = await fetch(makeAssetUrl(item.path), { cache: "no-store" });
+async function downloadAsset(
+  item,
+  bundleDirectory,
+  label,
+  index,
+  total
+) {
+  const response = await fetch(makeAssetUrl(item.path), {
+    cache: "no-store"
+  });
 
   if (!response.ok) {
-    throw new Error("Could not download " + item.path + " (HTTP " + response.status + ").");
+    throw new Error(
+      "Could not download " + item.path +
+      " (HTTP " + response.status + ")."
+    );
   }
 
   const bytes = await response.arrayBuffer();
 
-  if (item.size != null && bytes.byteLength !== item.size) {
+  if (
+    item.size != null &&
+    bytes.byteLength !== item.size
+  ) {
     throw new Error(
       "Size mismatch for " + item.path +
       ": expected " + item.size +
@@ -213,22 +324,32 @@ async function downloadAsset(item, bundleDirectory, label, index, total) {
     );
   }
 
-  await writeOPFSFile(bundleDirectory, item.name, bytes);
+  await writeOPFSFile(
+    bundleDirectory,
+    item.name,
+    bytes
+  );
 
   log(
-    "Cached " + label + " " + (index + 1) + "/" + total +
+    "Cached " + label + " " +
+    (index + 1) + "/" + total +
     ": " + item.name +
-    " (" + bytes.byteLength.toLocaleString() + " bytes)."
+    " (" + bytes.byteLength.toLocaleString() +
+    " bytes)."
   );
 }
 
 async function cacheGameAssets(manifest, rootDirectory) {
   if (!manifest.game || manifest.game.name !== "game.unx") {
-    throw new Error("This build has no game.unx archive.");
+    throw new Error(
+      "This build has no game.unx archive."
+    );
   }
 
   if (!Array.isArray(manifest.music)) {
-    throw new Error("The asset manifest has an invalid music list.");
+    throw new Error(
+      "The asset manifest has an invalid music list."
+    );
   }
 
   const music = manifest.music.map((item) => {
@@ -239,24 +360,48 @@ async function cacheGameAssets(manifest, rootDirectory) {
       item.name.includes("/") ||
       item.name.includes("\\")
     ) {
-      throw new Error("The asset manifest contains an invalid music entry.");
+      throw new Error(
+        "The asset manifest contains an invalid music entry."
+      );
     }
 
     return item;
   });
 
   const items = [manifest.game, ...music];
-  const expectedNames = new Set(items.map((item) => item.name));
+
+  const expectedNames = new Set(
+    items.map((item) => item.name)
+  );
 
   if (expectedNames.size !== items.length) {
-    throw new Error("Two game assets have the same filename.");
+    throw new Error(
+      "Two game assets have the same filename."
+    );
   }
 
-  const bundleDirectory = await getDirectory(rootDirectory, OPFS_BUNDLE_DIR);
-  const metaDirectory = await getDirectory(rootDirectory, OPFS_META_DIR);
+  const bundleDirectory = await getDirectory(
+    rootDirectory,
+    OPFS_BUNDLE_DIR
+  );
 
-  if (await isBundleCached(bundleDirectory, metaDirectory, manifest, items)) {
-    log("Game files already exist in this browser's private storage; skipping download.");
+  const metaDirectory = await getDirectory(
+    rootDirectory,
+    OPFS_META_DIR
+  );
+
+  if (
+    await isBundleCached(
+      bundleDirectory,
+      metaDirectory,
+      manifest,
+      items
+    )
+  ) {
+    log(
+      "Game files already exist in this browser's private storage; skipping download."
+    );
+
     return bundleDirectory;
   }
 
@@ -268,14 +413,19 @@ async function cacheGameAssets(manifest, rootDirectory) {
     await downloadAsset(
       item,
       bundleDirectory,
-      item === manifest.game ? "game archive" : "audio file",
+      item === manifest.game
+        ? "game archive"
+        : "audio file",
       index,
       items.length
     );
   }
 
   for await (const [name, handle] of bundleDirectory.entries()) {
-    if (handle.kind === "file" && !expectedNames.has(name)) {
+    if (
+      handle.kind === "file" &&
+      !expectedNames.has(name)
+    ) {
       await bundleDirectory.removeEntry(name);
     }
   }
@@ -283,22 +433,32 @@ async function cacheGameAssets(manifest, rootDirectory) {
   await writeOPFSFile(
     metaDirectory,
     "asset-version.txt",
-    new TextEncoder().encode(String(manifest.version || ""))
+    new TextEncoder().encode(
+      String(manifest.version || "")
+    )
   );
 
   log("Game assets cached.");
+
   return bundleDirectory;
 }
 
 async function unlockAudioFromUserGesture() {
-  if (!runnerStarted || !starfait || audioUnlocked) return;
+  if (!runnerStarted || !starfait || audioUnlocked) {
+    return;
+  }
 
   try {
     starfait.resumeAudioContext();
+
     audioUnlocked = true;
+
     log("Browser audio context resumed.");
   } catch (error) {
-    log("Audio resume error: " + describeError(error));
+    log(
+      "Audio resume error: " +
+      describeError(error)
+    );
   }
 }
 
@@ -310,9 +470,11 @@ async function startGame() {
       log("Starting Undertale webport…");
 
       startupStage = "loading Starfait module";
+
       starfait = await loadStarfaitModule();
 
       startupStage = "loading asset manifest";
+
       const manifest = await fetchJson(ASSET_MANIFEST);
 
       if (!manifest || typeof manifest !== "object") {
@@ -324,10 +486,13 @@ async function startGame() {
       startupStage = "checking OPFS support";
 
       if (!navigator.storage?.getDirectory) {
-        throw new Error("This browser does not support OPFS.");
+        throw new Error(
+          "This browser does not support Origin Private File System (OPFS)."
+        );
       }
 
       startupStage = "opening OPFS storage";
+
       const rootDirectory = await navigator.storage.getDirectory();
 
       try {
@@ -339,43 +504,63 @@ async function startGame() {
             : "Browser storage is available; persistence may depend on browser policy."
         );
       } catch (error) {
-        log("Could not request persistent storage: " + describeError(error));
+        log(
+          "Could not request persistent storage: " +
+          describeError(error)
+        );
       }
 
       startupStage = "caching game assets";
+
       await cacheGameAssets(manifest, rootDirectory);
 
       startupStage = "opening save directory";
+
       await getDirectory(rootDirectory, OPFS_SAVE_DIR);
 
       startupStage = "Starfait createRunner";
+
       log("Creating Starfait runner…");
       log("Browser: " + navigator.userAgent);
       log("WebAssembly: " + typeof WebAssembly);
-      log("WebGL2: " + Boolean(canvas.getContext("webgl2")));
-
-      const result = await captureStarfaitOutput(() =>
-        starfait.createRunner(
-          OPFS_BUNDLE_DIR,
-          OPFS_SAVE_DIR,
-          "game.unx",
-          canvas
-        )
+      log(
+        "WebGL2: " +
+        Boolean(canvas.getContext("webgl2"))
       );
 
-      log("Starfait createRunner returned: " + String(result));
+      log("Calling Starfait createRunner now…");
+
+      // Console interception is already active before the module import.
+      const result = await starfait.createRunner(
+        OPFS_BUNDLE_DIR,
+        OPFS_SAVE_DIR,
+        "game.unx",
+        canvas
+      );
+
+      log(
+        "Starfait createRunner returned: " +
+        String(result)
+      );
 
       if (result === false) {
-        throw new Error("Starfait refused to initialise the game archive.");
+        throw new Error(
+          "Starfait refused to initialise the game archive."
+        );
       }
 
       startupStage = "Starfait startRunner";
-      starfait.startRunner(() => log("Starfait game loop ended."));
+
+      starfait.startRunner(
+        () => log("Starfait game loop ended.")
+      );
 
       runnerStarted = true;
+
       canvas.focus();
 
       log("Runner started. Keyboard input is ready.");
+
       startupStage = "completed";
     } catch (error) {
       log("BOOT ERROR during: " + startupStage);
@@ -391,6 +576,7 @@ async function startGame() {
       }
 
       setDebugVisible(true);
+
       throw error;
     }
   })();
@@ -428,13 +614,25 @@ function getGameKeyCode(event) {
     0
   );
 
-  return Number.isInteger(code) && code > 0 && code < 256 ? code : 0;
+  return Number.isInteger(code) &&
+    code > 0 &&
+    code < 256
+    ? code
+    : 0;
 }
 
 function sendKeyDown(code) {
-  if (!code || !runnerStarted || !starfait || heldKeys.has(code)) return;
+  if (
+    !code ||
+    !runnerStarted ||
+    !starfait ||
+    heldKeys.has(code)
+  ) {
+    return;
+  }
 
   heldKeys.add(code);
+
   starfait.onKeyDown(code);
 }
 
@@ -460,18 +658,33 @@ window.addEventListener("keydown", (event) => {
 
     if (!document.fullscreenElement) {
       $("stage").requestFullscreen?.().catch((error) =>
-        log("Fullscreen error: " + describeError(error))
+        log(
+          "Fullscreen error: " +
+          describeError(error)
+        )
       );
     } else {
       document.exitFullscreen?.().catch((error) =>
-        log("Fullscreen error: " + describeError(error))
+        log(
+          "Fullscreen error: " +
+          describeError(error)
+        )
       );
     }
 
     return;
   }
 
-  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " ", "Tab"].includes(event.key)) {
+  if (
+    [
+      "ArrowUp",
+      "ArrowDown",
+      "ArrowLeft",
+      "ArrowRight",
+      " ",
+      "Tab"
+    ].includes(event.key)
+  ) {
     event.preventDefault();
   }
 
@@ -500,19 +713,27 @@ canvas.addEventListener("pointerdown", () => {
   }
 });
 
-canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+canvas.addEventListener("contextmenu", (event) => {
+  event.preventDefault();
+});
 
 debugToggle.addEventListener("click", (event) => {
   event.stopPropagation();
   toggleDebug();
 });
 
-if (new URLSearchParams(location.search).get("debug") === "1") {
+if (
+  new URLSearchParams(location.search).get("debug") === "1"
+) {
   setDebugVisible(true);
 }
 
-log("Keyboard: arrows / WASD, Z / Enter to confirm, X / Shift to cancel.");
+log(
+  "Keyboard: arrows / WASD, Z / Enter to confirm, X / Shift to cancel."
+);
+
 log("F1 = debug log. F2 = fullscreen.");
+
 log("Game files and saves use OPFS. Runner: Starfait.");
 
 startGame().catch(() => {});
